@@ -1,0 +1,12 @@
+﻿venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+.streamlit/secrets.toml
+*.mp4
+*.avi
+*.mov
+*.mkv
+diagnostic_lame.png
