@@ -18,6 +18,15 @@ st.set_page_config(
 )
 
 st.title("Compteur de câbles — STARZ")
+mode = st.radio("Source", ["Vidéo", "Caméra en direct"], horizontal=True)
+if mode == "Caméra en direct":
+    from camera_direct import afficher_camera
+    afficher_camera()
+    st.stop()
+cam = st.session_state.pop("camera_direct", None)
+if cam is not None:
+    cam.fermer()
+
 st.info(
     "Ajoute plusieurs exemples ouverts et fermés, "
     "puis analyse la vidéo."
