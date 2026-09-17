@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lecteur CODE_128 - STARZ</title>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f4f6f8;
+      color: #111;
+    }
+
+    h1 { margin-bottom: 12px; }
+
+    .instruction {
+      max-width: 900px;
+      background: white;
+      padding: 14px;
+      border-radius: 8px;
+      margin-bottom: 15px;
+      line-height: 1.45;
+    }
+
+    button {
+      padding: 10px 16px;
+      margin: 0 8px 10px 0;
+      font-size: 15px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #message {
+      max-width: 900px;
+      background: white;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 17px;
+      font-weight: bold;
+    }
+
+    #resolution { color: #555; }
+
+    #resultat {
+      color: green;
+      font-size: 30px;
+    }
+
+    #zoneCamera {
+      position: relative;
+      width: 100%;
+      max-width: 900px;
+      margin-top: 15px;
+    }
+
+    #video {
+      display: block;
+      width: 100%;
+      background: #222;
+      border-radius: 8px;
+    }
+
+    /*
+      Le rectangle vert EST la zone lue.
+      Place seulement le code-barres dans ce rectangle,
+      avec un peu de blanc à gauche et à droite.
+    */
+    #zoneScan {
+      position: absolute;
+      left: 20%;
+      top: 38%;
+      width: 60%;
+      height: 24%;
+      border: 3px solid #00e65b;
+      box-sizing: border-box;
+      pointer-events: none;
+    }
+
+    #ligneScan {
+      position: absolute;
+      left: 3%;
+      right: 3%;
+      top: 50%;
+      height: 3px;
+      background: red;
+    }
+
+    .previews {
+      max-width: 900px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 15px;
+      margin-top: 20px;
+    }
+
+    .preview-box {
+      background: white;
+      padding: 12px;
+      border-radius: 8px;
+    }
+
+    .preview-box h3 {
+      margin: 0 0 10px;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      max-width: 900px;
+      height: auto;
+      background: white;
+      border: 2px solid #1e66ff;
+    }
+
+    #canvasTraite {
+      border-color: #9c27b0;
+    }
+
+    #debug {
+      max-width: 900px;
+      margin-top: 15px;
+      padding: 12px;
+      background: #111;
+      color: #d7ffd7;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      min-height: 90px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>Lecteur de codes-barres CODE_128</h1>
+
+  <div class="instruction">
+    <strong>Test STARZ :</strong><br>
+    Place le code-barres entier dans le rectangle vert.<br>
+    Il doit être horizontal, net et assez grand, avec un peu d'espace blanc
+    avant la première barre et après la dernière barre.
+    <br><br>
+    Le programme accepte uniquement un code au format
+    <strong>48247-1</strong> (5 chiffres, tiret, 1 chiffre).
+  </div>
+
+  <button id="demarrer">Ouvrir la caméra</button>
+  <button id="arreter" disabled>Arrêter</button>
+  <button id="capturer" disabled>Capturer et analyser</button>
+
+  <p id="message">Cliquez sur « Ouvrir la caméra ».</p>
+  <p id="resolution"></p>
+
+  <p>
+    Dernier code valide :
+    <strong id="resultat">Aucun</strong>
+  </p>
+
+  <div id="zoneCamera">
+    <video id="video" autoplay playsinline muted></video>
+
+    <div id="zoneScan">
+      <div id="ligneScan"></div>
+    </div>
+  </div>
+
+  <div class="previews">
+    <div class="preview-box">
+      <h3>Zone réellement analysée</h3>
+      <canvas id="canvasCapture"></canvas>
+    </div>
+
+    <div class="preview-box">
+      <h3>Dernière image traitée</h3>
+      <canvas id="canvasTraite"></canvas>
+    </div>
+  </div>
+
+  <div id="debug">Diagnostic : en attente.</div>
+
+  <!-- ZXing Core : BarcodeFormat + DecodeHintType -->
+  <script src="https://unpkg.com/@zxing/library@0.21.3"></script>
+
+  <!-- ZXing Browser -->
+  <script src="https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+
+  <script>
+    const video = document.getElementById("video");
+    const zoneScan = document.getElementById("zoneScan");
+
+    const resultat = document.getElementById("resultat");
+    const message = document.getElementById("message");
+    const resolution = document.getElementById("resolution");
+
+    const demarrer = document.getElementById("demarrer");
+    const arreter = document.getElementById("arreter");
+    const capturer = document.getElementById("capturer");
+
+    const canvasCapture = document.getElementById("canvasCapture");
+    const canvasTraite = document.getElementById("canvasTraite");
+    const debug = document.getElementById("debug");
+
+    let streamCamera = null;
+    let lecteurImage = null;
+    let pisteCamera = null;
+
+    /*
+      Pour le test actuel :
+      48247-1, 48246-1, etc.
+    */
+    const FORMAT_ATTENDU = /^\d{5}-\d$/;
+
+    let candidatsRejetes = [];
+
+    function logDebug(texte) {
+      debug.textContent = texte;
+      console.log(texte);
+    }
+
+    function ajouterCandidatRejete(texte, methode) {
+      const valeur = String(texte ?? "").trim();
+
+      if (!valeur) return;
+
+      candidatsRejetes.push(
+        valeur + "  [" + methode + "]"
+      );
+
+      /*
+        Evite un diagnostic énorme.
+      */
+      if (candidatsRejetes.length > 12) {
+        candidatsRejetes.shift();
+      }
+    }
+
+    /*
+      IMPORTANT :
+      Cette fonction renvoie TRUE uniquement
+      si le texte est réellement valide.
+    */
+    function codeTrouve(texte, methode = "") {
+      if (!texte) {
+        return false;
+      }
+
+      texte = String(texte).trim();
+
+      if (!FORMAT_ATTENDU.test(texte)) {
+        ajouterCandidatRejete(texte, methode);
+
+        console.log(
+          "Lecture rejetée :",
+          texte,
+          "| méthode :",
+          methode
+        );
+
+        return false;
+      }
+
+      resultat.textContent = texte;
+
+      message.textContent =
+        "✓ Code-barres valide détecté : " +
+        texte +
+        " — " +
+        methode;
+
+      logDebug(
+        "SUCCÈS\n\n" +
+        "Code : " + texte + "\n" +
+        "Format : CODE_128\n" +
+        "Méthode : " + methode
+      );
+
+      return true;
+    }
+
+    function arreterCamera() {
+      if (streamCamera) {
+        streamCamera
+          .getTracks()
+          .forEach(track => track.stop());
+
+        streamCamera = null;
+      }
+
+      pisteCamera = null;
+      video.srcObject = null;
+
+      demarrer.disabled = false;
+      arreter.disabled = true;
+      capturer.disabled = true;
+    }
+
+    async function optimiserCamera(track) {
+      try {
+        if (
+          !track ||
+          typeof track.getCapabilities !== "function"
+        ) {
+          return;
+        }
+
+        const caps = track.getCapabilities();
+        const advanced = {};
+
+        /*
+          On évite le maximum 20 de netteté :
+          il produisait des contours trop agressifs.
+        */
+        if (caps.sharpness) {
+          advanced.sharpness = Math.max(
+            caps.sharpness.min,
+            Math.min(10, caps.sharpness.max)
+          );
+        }
+
+        if (caps.contrast) {
+          advanced.contrast = Math.max(
+            caps.contrast.min,
+            Math.min(35, caps.contrast.max)
+          );
+        }
+
+        if (Object.keys(advanced).length > 0) {
+          await track.applyConstraints({
+            advanced: [advanced]
+          });
+        }
+
+        console.log(
+          "CAPACITES CAMERA :",
+          caps
+        );
+
+        console.log(
+          "REGLAGES CAMERA :",
+          track.getSettings()
+        );
+
+      } catch (e) {
+        console.log(
+          "Optimisation caméra non appliquée :",
+          e
+        );
+      }
+    }
+
+    demarrer.onclick = async () => {
+      if (
+        !navigator.mediaDevices ||
+        !navigator.mediaDevices.getUserMedia
+      ) {
+        message.textContent =
+          "Ce navigateur ne permet pas d'utiliser la caméra.";
+        return;
+      }
+
+      if (!window.ZXingBrowser || !window.ZXing) {
+        message.textContent =
+          "ZXing n'est pas chargé. Vérifie la connexion Internet.";
+        return;
+      }
+
+      arreterCamera();
+
+      resultat.textContent = "Aucun";
+      candidatsRejetes = [];
+
+      demarrer.disabled = true;
+
+      message.textContent =
+        "Ouverture de la caméra…";
+
+      logDebug(
+        "Diagnostic : ouverture de la caméra…"
+      );
+
+      try {
+        /*
+          Ta webcam a confirmé :
+          max width  = 1280
+          max height = 720
+        */
+        const contraintes = {
+          video: {
+            width:  { exact: 1280 },
+            height: { exact: 720 },
+            frameRate: { ideal: 30 },
+            facingMode: { ideal: "user" }
+          },
+          audio: false
+        };
+
+        streamCamera =
+          await navigator.mediaDevices.getUserMedia(
+            contraintes
+          );
+
+        video.srcObject = streamCamera;
+
+        await video.play();
+
+        pisteCamera =
+          streamCamera.getVideoTracks()[0];
+
+        await optimiserCamera(
+          pisteCamera
+        );
+
+        /*
+          CODE_128 uniquement.
+
+          BrowserMultiFormatReader accepte les hints.
+          TRY_HARDER est utilisé ici avec le lecteur multi-format,
+          pas avec BrowserMultiFormatOneDReader.
+        */
+        const hints = new Map();
+
+        hints.set(
+          ZXing.DecodeHintType.POSSIBLE_FORMATS,
+          [ZXing.BarcodeFormat.CODE_128]
+        );
+
+        hints.set(
+          ZXing.DecodeHintType.TRY_HARDER,
+          true
+        );
+
+        lecteurImage =
+          new ZXingBrowser.BrowserMultiFormatReader(
+            hints
+          );
+
+        const settings =
+          pisteCamera.getSettings();
+
+        resolution.textContent =
+          "Caméra : " +
+          video.videoWidth +
+          " × " +
+          video.videoHeight +
+          " | FPS : " +
+          (settings.frameRate ?? "?") +
+          " | Netteté : " +
+          (settings.sharpness ?? "non exposée") +
+          " | Contraste : " +
+          (settings.contrast ?? "non exposé");
+
+        arreter.disabled = false;
+        capturer.disabled = false;
+
+        message.textContent =
+          "Caméra prête. Place le code-barres dans le rectangle vert puis clique sur « Capturer et analyser ».";
+
+      } catch (erreur) {
+        arreterCamera();
+
+        message.textContent =
+          "Erreur caméra : " +
+          erreur.name +
+          " — " +
+          erreur.message;
+
+        logDebug(
+          "ERREUR CAMERA\n\n" +
+          erreur.name + "\n" +
+          erreur.message
+        );
+      }
+    };
+
+    /*
+      Capture EXACTEMENT le rectangle vert
+      dans la résolution native de la vidéo.
+    */
+    function capturerZone() {
+      if (
+        !video.videoWidth ||
+        !video.videoHeight
+      ) {
+        return null;
+      }
+
+      const rectVideo =
+        video.getBoundingClientRect();
+
+      const rectScan =
+        zoneScan.getBoundingClientRect();
+
+      const ratioX =
+        video.videoWidth / rectVideo.width;
+
+      const ratioY =
+        video.videoHeight / rectVideo.height;
+
+      const x =
+        (rectScan.left - rectVideo.left) * ratioX;
+
+      const y =
+        (rectScan.top - rectVideo.top) * ratioY;
+
+      const w =
+        rectScan.width * ratioX;
+
+      const h =
+        rectScan.height * ratioY;
+
+      const sortie =
+        document.createElement("canvas");
+
+      sortie.width =
+        Math.max(1, Math.round(w));
+
+      sortie.height =
+        Math.max(1, Math.round(h));
+
+      const ctx = sortie.getContext(
+        "2d",
+        { willReadFrequently: true }
+      );
+
+      /*
+        Pas de zoom artificiel ici.
+        On conserve d'abord les pixels natifs.
+      */
+      ctx.drawImage(
+        video,
+        x, y, w, h,
+        0, 0,
+        sortie.width,
+        sortie.height
+      );
+
+      return sortie;
+    }
+
+    function copierCanvas(source) {
+      const sortie =
+        document.createElement("canvas");
+
+      sortie.width = source.width;
+      sortie.height = source.height;
+
+      sortie
+        .getContext("2d")
+        .drawImage(source, 0, 0);
+
+      return sortie;
+    }
+
+    function afficherCanvas(source, destination) {
+      destination.width = source.width;
+      destination.height = source.height;
+
+      const ctx =
+        destination.getContext("2d");
+
+      ctx.clearRect(
+        0,
+        0,
+        destination.width,
+        destination.height
+      );
+
+      ctx.drawImage(
+        source,
+        0,
+        0
+      );
+    }
+
+    function ajouterMargeBlanche(
+      source,
+      margeX = 50,
+      margeY = 25
+    ) {
+      const sortie =
+        document.createElement("canvas");
+
+      sortie.width =
+        source.width + margeX * 2;
+
+      sortie.height =
+        source.height + margeY * 2;
+
+      const ctx =
+        sortie.getContext("2d");
+
+      ctx.fillStyle = "white";
+
+      ctx.fillRect(
+        0,
+        0,
+        sortie.width,
+        sortie.height
+      );
+
+      ctx.drawImage(
+        source,
+        margeX,
+        margeY
+      );
+
+      return sortie;
+    }
+
+    function agrandirCanvas(
+      source,
+      facteur = 2,
+      lissage = false
+    ) {
+      const sortie =
+        document.createElement("canvas");
+
+      sortie.width =
+        Math.round(source.width * facteur);
+
+      sortie.height =
+        Math.round(source.height * facteur);
+
+      const ctx =
+        sortie.getContext("2d");
+
+      ctx.imageSmoothingEnabled =
+        lissage;
+
+      if (
+        lissage &&
+        "imageSmoothingQuality" in ctx
+      ) {
+        ctx.imageSmoothingQuality =
+          "high";
+      }
+
+      ctx.drawImage(
+        source,
+        0,
+        0,
+        sortie.width,
+        sortie.height
+      );
+
+      return sortie;
+    }
+
+    function niveauxDeGrisContraste(
+      source,
+      contraste = 35
+    ) {
+      const sortie =
+        copierCanvas(source);
+
+      const ctx =
+        sortie.getContext(
+          "2d",
+          { willReadFrequently: true }
+        );
+
+      const image =
+        ctx.getImageData(
+          0,
+          0,
+          sortie.width,
+          sortie.height
+        );
+
+      const pixels = image.data;
+
+      const facteur =
+        (259 * (contraste + 255)) /
+        (255 * (259 - contraste));
+
+      for (
+        let i = 0;
+        i < pixels.length;
+        i += 4
+      ) {
+        let gris =
+          0.299 * pixels[i] +
+          0.587 * pixels[i + 1] +
+          0.114 * pixels[i + 2];
+
+        gris =
+          facteur * (gris - 128) + 128;
+
+        gris =
+          Math.max(
+            0,
+            Math.min(255, gris)
+          );
+
+        pixels[i] = gris;
+        pixels[i + 1] = gris;
+        pixels[i + 2] = gris;
+      }
+
+      ctx.putImageData(
+        image,
+        0,
+        0
+      );
+
+      return sortie;
+    }
+
+    function seuillage(
+      source,
+      seuil
+    ) {
+      const sortie =
+        copierCanvas(source);
+
+      const ctx =
+        sortie.getContext(
+          "2d",
+          { willReadFrequently: true }
+        );
+
+      const image =
+        ctx.getImageData(
+          0,
+          0,
+          sortie.width,
+          sortie.height
+        );
+
+      const pixels = image.data;
+
+      for (
+        let i = 0;
+        i < pixels.length;
+        i += 4
+      ) {
+        const gris =
+          0.299 * pixels[i] +
+          0.587 * pixels[i + 1] +
+          0.114 * pixels[i + 2];
+
+        const valeur =
+          gris < seuil ? 0 : 255;
+
+        pixels[i] = valeur;
+        pixels[i + 1] = valeur;
+        pixels[i + 2] = valeur;
+      }
+
+      ctx.putImageData(
+        image,
+        0,
+        0
+      );
+
+      return sortie;
+    }
+
+    function tournerCanvas(
+      source,
+      angle
+    ) {
+      if (angle === 0) {
+        return source;
+      }
+
+      const rad =
+        angle * Math.PI / 180;
+
+      const cos =
+        Math.abs(Math.cos(rad));
+
+      const sin =
+        Math.abs(Math.sin(rad));
+
+      const w =
+        Math.ceil(
+          source.width * cos +
+          source.height * sin
+        );
+
+      const h =
+        Math.ceil(
+          source.width * sin +
+          source.height * cos
+        );
+
+      const sortie =
+        document.createElement("canvas");
+
+      sortie.width = w;
+      sortie.height = h;
+
+      const ctx =
+        sortie.getContext("2d");
+
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.translate(
+        w / 2,
+        h / 2
+      );
+
+      ctx.rotate(rad);
+
+      ctx.drawImage(
+        source,
+        -source.width / 2,
+        -source.height / 2
+      );
+
+      return sortie;
+    }
+
+    /*
+      IMPORTANT :
+      Si ZXing retourne "P ·-(" ou un autre faux résultat,
+      on ne s'arrête PAS.
+      On rejette le résultat et on continue les autres essais.
+    */
+    function essayerZXing(
+      image,
+      methode
+    ) {
+      try {
+        const code =
+          lecteurImage.decodeFromCanvas(
+            image
+          );
+
+        if (!code) {
+          return false;
+        }
+
+        return codeTrouve(
+          code.getText(),
+          methode
+        );
+
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function essayerBarcodeDetector(
+      image,
+      methode
+    ) {
+      if (!("BarcodeDetector" in window)) {
+        return false;
+      }
+
+      try {
+        let formats = [];
+
+        if (
+          typeof BarcodeDetector.getSupportedFormats
+          === "function"
+        ) {
+          formats =
+            await BarcodeDetector
+              .getSupportedFormats();
+        }
+
+        if (
+          formats.length &&
+          !formats.includes("code_128")
+        ) {
+          return false;
+        }
+
+        const detector =
+          new BarcodeDetector({
+            formats: ["code_128"]
+          });
+
+        const codes =
+          await detector.detect(image);
+
+        if (!codes || !codes.length) {
+          return false;
+        }
+
+        for (const code of codes) {
+          if (
+            codeTrouve(
+              code.rawValue,
+              methode + " / BarcodeDetector"
+            )
+          ) {
+            return true;
+          }
+        }
+
+      } catch (e) {
+        console.log(
+          "BarcodeDetector :",
+          e
+        );
+      }
+
+      return false;
+    }
+
+    capturer.onclick = async () => {
+      if (
+        video.readyState < 2 ||
+        !video.videoWidth
+      ) {
+        message.textContent =
+          "La caméra n'est pas prête.";
+        return;
+      }
+
+      if (!lecteurImage) {
+        message.textContent =
+          "Le lecteur ZXing n'est pas initialisé.";
+        return;
+      }
+
+      resultat.textContent = "Aucun";
+      candidatsRejetes = [];
+
+      message.textContent =
+        "Analyse en cours…";
+
+      logDebug(
+        "Analyse démarrée…"
+      );
+
+      const capture =
+        capturerZone();
+
+      if (!capture) {
+        message.textContent =
+          "Impossible de capturer la zone.";
+        return;
+      }
+
+      afficherCanvas(
+        capture,
+        canvasCapture
+      );
+
+      /*
+        Chaque élément représente une image
+        que l'on va tenter de décoder.
+      */
+      const essais = [];
+
+      /*
+        1) Pixels natifs.
+      */
+      essais.push({
+        image: capture,
+        nom: "image native"
+      });
+
+      /*
+        2) Pixels natifs + zone blanche.
+      */
+      const nativeMarge =
+        ajouterMargeBlanche(
+          capture,
+          60,
+          30
+        );
+
+      essais.push({
+        image: nativeMarge,
+        nom: "native + marges"
+      });
+
+      /*
+        3) Agrandissements :
+        - sans lissage
+        - avec lissage
+      */
+      const x2Net =
+        agrandirCanvas(
+          nativeMarge,
+          2,
+          false
+        );
+
+      essais.push({
+        image: x2Net,
+        nom: "agrandissement x2 sans lissage"
+      });
+
+      const x2Lisse =
+        agrandirCanvas(
+          nativeMarge,
+          2,
+          true
+        );
+
+      essais.push({
+        image: x2Lisse,
+        nom: "agrandissement x2 lissé"
+      });
+
+      /*
+        4) Plusieurs contrastes,
+        plutôt que de forcer une seule valeur.
+      */
+      const contrastes = [
+        20,
+        35,
+        50,
+        70
+      ];
+
+      for (const contraste of contrastes) {
+        const gris =
+          niveauxDeGrisContraste(
+            nativeMarge,
+            contraste
+          );
+
+        essais.push({
+          image: gris,
+          nom:
+            "gris contraste " +
+            contraste
+        });
+
+        /*
+          Rotations légères seulement.
+        */
+        for (
+          const angle of [-4, -2, 2, 4]
+        ) {
+          essais.push({
+            image:
+              tournerCanvas(
+                gris,
+                angle
+              ),
+
+            nom:
+              "gris " +
+              contraste +
+              " rotation " +
+              angle +
+              "°"
+          });
+        }
+      }
+
+      /*
+        5) Noir / blanc à plusieurs seuils.
+      */
+      const grisBase =
+        niveauxDeGrisContraste(
+          nativeMarge,
+          35
+        );
+
+      for (
+        const seuil of
+        [100, 120, 140, 160, 180, 200]
+      ) {
+        const nb =
+          seuillage(
+            grisBase,
+            seuil
+          );
+
+        essais.push({
+          image: nb,
+          nom:
+            "seuil " +
+            seuil
+        });
+
+        for (
+          const angle of [-3, 3]
+        ) {
+          essais.push({
+            image:
+              tournerCanvas(
+                nb,
+                angle
+              ),
+
+            nom:
+              "seuil " +
+              seuil +
+              " rotation " +
+              angle +
+              "°"
+          });
+        }
+      }
+
+      /*
+        On affiche une version utile dans
+        "Dernière image traitée".
+      */
+      afficherCanvas(
+        grisBase,
+        canvasTraite
+      );
+
+      /*
+        BarcodeDetector sur les versions les plus naturelles.
+      */
+      if (
+        await essayerBarcodeDetector(
+          capture,
+          "image native"
+        )
+      ) {
+        return;
+      }
+
+      if (
+        await essayerBarcodeDetector(
+          nativeMarge,
+          "native + marges"
+        )
+      ) {
+        return;
+      }
+
+      /*
+        ZXing :
+        si un faux texte est trouvé, essayerZXing()
+        renvoie false et la boucle CONTINUE.
+      */
+      for (const essai of essais) {
+        if (
+          essayerZXing(
+            essai.image,
+            essai.nom
+          )
+        ) {
+          afficherCanvas(
+            essai.image,
+            canvasTraite
+          );
+
+          return;
+        }
+      }
+
+      message.textContent =
+        "Aucun code valide détecté. Les faux décodages éventuels ont été rejetés.";
+
+      const settings =
+        pisteCamera
+          ? pisteCamera.getSettings()
+          : {};
+
+      const lignes = [
+        "Taille vidéo : " +
+          video.videoWidth +
+          " × " +
+          video.videoHeight,
+
+        "Zone native analysée : " +
+          capture.width +
+          " × " +
+          capture.height,
+
+        "Netteté caméra : " +
+          (settings.sharpness ?? "?"),
+
+        "Contraste caméra : " +
+          (settings.contrast ?? "?"),
+
+        "",
+        "Aucun code au format 00000-0 n'a été validé."
+      ];
+
+      if (candidatsRejetes.length) {
+        lignes.push(
+          "",
+          "Lectures ZXing/BarcodeDetector rejetées :"
+        );
+
+        for (
+          const candidat of candidatsRejetes
+        ) {
+          lignes.push(
+            "- " + candidat
+          );
+        }
+      }
+
+      lignes.push(
+        "",
+        "Pour le prochain test :",
+        "- rapproche le papier sans perdre la netteté ;",
+        "- garde toutes les barres dans le rectangle vert ;",
+        "- laisse une petite marge blanche à gauche et à droite ;",
+        "- évite les reflets."
+      );
+
+      logDebug(
+        lignes.join("\n")
+      );
+    };
+
+    arreter.onclick = () => {
+      arreterCamera();
+
+      message.textContent =
+        "Caméra arrêtée.";
+
+      logDebug(
+        "Caméra arrêtée."
+      );
+    };
+
+    window.addEventListener(
+      "pagehide",
+      arreterCamera
+    );
+  </script>
+
+</body>
+</html>
