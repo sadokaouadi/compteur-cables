@@ -5,8 +5,59 @@ import cv2
 import streamlit as st
 
 
+
+def pretraiter_image(image):
+    """
+    Rendre l'image moins sensible aux variations d'éclairage
+    sans changer brutalement l'échelle des différences.
+
+    Étapes :
+    1) niveaux de gris ;
+    2) normalisation globale ;
+    3) CLAHE pour le contraste local ;
+    4) léger flou anti-bruit.
+
+    IMPORTANT :
+    on n'utilise plus Canny ici, car une image binaire de contours
+    faisait monter fortement les différences et rendait trop souvent
+    l'état INDETERMINE avec les seuils actuels.
+    """
+    if image is None or image.size == 0:
+        raise ValueError("Image vide.")
+
+    if len(image.shape) == 3:
+        gris = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gris = image.copy()
+
+    normalisee = cv2.normalize(
+        gris,
+        None,
+        alpha=0,
+        beta=255,
+        norm_type=cv2.NORM_MINMAX
+    )
+
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+    contraste = clahe.apply(normalisee)
+
+    contraste = cv2.GaussianBlur(
+        contraste,
+        (3, 3),
+        0
+    )
+
+    return contraste
+
+
 def preparer_references(references):
-    """Convertir toutes les références RGB en niveaux de gris."""
+    """
+    Préparer toutes les références avec le même traitement robuste
+    à l'éclairage que celui appliqué aux images en temps réel.
+    """
     preparees = {}
 
     for etat in ("ouvert", "ferme"):
@@ -18,7 +69,7 @@ def preparer_references(references):
             )
 
         preparees[etat] = [
-            cv2.cvtColor(ref["image"], cv2.COLOR_RGB2GRAY)
+            pretraiter_image(ref["image"])
             for ref in exemples
         ]
 
@@ -36,21 +87,26 @@ def preparer_references(references):
     return preparees
 
 
-def estimer_etat(gris, preparees, marge, seuil_max):
-    """Comparer l'image à l'exemple le plus proche de chaque état."""
+def estimer_etat(image, preparees, marge, seuil_max):
+    """
+    Comparer l'image actuelle aux références OUVERT / FERMÉ après
+    normalisation de luminosité + CLAHE.
+    """
+    traitee = pretraiter_image(image)
+
     for exemples in preparees.values():
-        if any(ref.shape != gris.shape for ref in exemples):
+        if any(ref.shape != traitee.shape for ref in exemples):
             raise ValueError(
                 "La taille de la zone ne correspond pas aux références."
             )
 
     diff_ouverte = min(
-        float(cv2.absdiff(gris, ref).mean())
+        float(cv2.absdiff(traitee, ref).mean())
         for ref in preparees["ouvert"]
     )
 
     diff_fermee = min(
-        float(cv2.absdiff(gris, ref).mean())
+        float(cv2.absdiff(traitee, ref).mean())
         for ref in preparees["ferme"]
     )
 
